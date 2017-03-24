@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -20,10 +21,14 @@ namespace CigarInventoryCrawler
 
     public class Crawler
     {
+        private const string BaseUrl = "";
+
         public async void GetCigarsList()
         {
             using (var httpClient = new HttpClient())
             {
+                
+                
                 //var response = await httpClient.GetAsync("");
                 //response.EnsureSuccessStatusCode();
 
@@ -39,6 +44,7 @@ namespace CigarInventoryCrawler
                 var document = new HtmlDocument();
                 document.Load("./cigars.txt");
 
+                // 50 results per page
                 var tableNodes = document
                     .DocumentNode
                     .SelectNodes("//table[@class='bbstable']/tr[position() > 2]")
@@ -59,7 +65,26 @@ namespace CigarInventoryCrawler
                         Strength = row.SelectSingleNode("(./td)[8]").InnerText
                     });
 
-                File.WriteAllText($"./cigars-output-{DateTime.Now.Ticks}.json", JsonConvert.SerializeObject(tableNodes));
+                // Total amount of pages
+                var lastPageNumber = int.Parse(document
+                    .DocumentNode
+                    .SelectSingleNode(@"//a[contains(text(), 'Last &gt;&gt;')]")
+                    .GetAttributeValue("href", "undefined")
+                    .Split('&')[1]
+                    .Remove(0, 5));
+
+
+                // Build ConcurrentBag of traversable URLs
+                var cigarPages = new ConcurrentBag<string>();
+
+                Enumerable
+                    .Range(1, lastPageNumber)
+                    .Select(page => $"{BaseUrl}/default.asp?action=srchrslt&amp;page={page}")
+                    .ToList()
+                    .ForEach(url => cigarPages.Add(url));
+                
+
+                //File.WriteAllText($"./cigars-output-{DateTime.Now.Ticks}.json", JsonConvert.SerializeObject(tableNodes));
             }
         }
 

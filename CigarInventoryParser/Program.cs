@@ -1,13 +1,13 @@
 ﻿using System;
-using System.Collections.Concurrent;
-using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
 using HtmlAgilityPack;
+using System.Collections.Generic;
+using System.IO;
 using Newtonsoft.Json;
+using System.Collections.Concurrent;
 
 namespace CigarInventoryCrawler
 {
@@ -25,23 +25,42 @@ namespace CigarInventoryCrawler
     {
         public class Config
         {
-            public string BaseUrl { get; set; }
+            public string CigarDbUrl { get; set; }
         }
 
-        public async Task ProxyTest()
-        {
-            var proxy = new WebProxy("198.50.235.188", 8080);
+        //public async Task<HttpWebResponse> GetThroughProxy()
+        //{
+        //    var proxyUriList = await GetHttpsProxyUrls();
+        //    var proxy = new WebProxy(proxyUriList.First());
 
-            using (var httpClientHandler = new HttpClientHandler
+        //    using (var httpClientHandler = new HttpClientHandler
+        //    {
+        //        Proxy = proxy
+        //    })
+        //    {
+        //        using (var httpClient = new HttpClient(httpClientHandler))
+        //        {
+        //            var response = await httpClient.GetStringAsync("https://api.ipify.org/");
+        //            Console.WriteLine($"Using Proxy IP address: {response}");
+        //        }
+        //    }
+        //}
+
+        private async Task<IEnumerable<string>> GetHttpsProxyUrls()
+        {
+            using(var httpClient = new HttpClient())
             {
-                Proxy = proxy,
-                //ClientCertificateOptions = ClientCertificateOption.Automatic
-            })
-            {
-                using (var httpClient = new HttpClient(httpClientHandler))
-                {
-                    var response = await httpClient.GetStringAsync("http://www.google.fi");
-                }
+                Console.WriteLine("Fetching proxy list file...");
+
+                var response = await httpClient.GetStringAsync("http://txt.proxyspy.net/proxy.txt");
+
+                Console.WriteLine("Proxy list file fetched. Processing...");
+
+                return response
+                    .Split('\n')
+                    .Select(line => line.Split(' '))
+                    .Where(cells => cells.Count() == 4 && cells.ElementAt(1).Contains("-S"))
+                    .Select(proxy => proxy.ElementAt(0));
             }
         }
 
@@ -49,63 +68,65 @@ namespace CigarInventoryCrawler
         {
             var config = File.ReadAllText("config.json");
             var scrapeConfig = JsonConvert.DeserializeObject<Config>(config);
+            var proxyUris = await GetHttpsProxyUrls();
 
-            await ProxyTest();
-
-            //var response = await httpClient.GetAsync("");
-            //response.EnsureSuccessStatusCode();
-
-            //var content = await response.Content.ReadAsStringAsync();
-
-            //var stream = new MemoryStream();
-            //var writer = new StreamWriter(stream);
-
-            //writer.Write(content);
-            //writer.Flush();
-            //stream.Position = 0;
-
-            var document = new HtmlDocument();
-            document.Load("./cigars.txt");
-
-            // 50 results per page
-            var tableNodes = document
-                .DocumentNode
-                .SelectNodes("//table[@class='bbstable']/tr[position() > 2]")
-                .Select(row => new CigarInfo
+            using (var httpClientHandler = new HttpClientHandler
+            {
+                Proxy = new WebProxy(proxyUris.First())
+            })
+            {
+                using (var httpClient = new HttpClient())
                 {
-                    Id = int.Parse(row
-                        .SelectSingleNode("./td/a")
-                        .GetAttributeValue("href", "Undefined")
-                        .Split('&')[1]
-                        .Remove(0, 9)),
-                    Name = row.SelectSingleNode("./td/a").InnerText,
-                    LengthInches = FormatNodeContentToDecimal(row.SelectSingleNode("(./td)[2]")),
-                    RingGauge = int.Parse(row.SelectSingleNode("(./td)[3]").InnerText),
-                    Country = row.SelectSingleNode("(./td)[4]").InnerText,
-                    FillerCountry = row.SelectSingleNode("(./td)[5]").InnerText,
-                    WrapperCountry = row.SelectSingleNode("(./td)[6]").InnerText,
-                    Color = row.SelectSingleNode("(./td)[7]").InnerText,
-                    Strength = row.SelectSingleNode("(./td)[8]").InnerText
-                });
+                    var response = await httpClient.GetAsync($"{scrapeConfig.CigarDbUrl}");
+                    response.EnsureSuccessStatusCode();
 
-            // Total amount of pages
-            var lastPageNumber = int.Parse(document
-                .DocumentNode
-                .SelectSingleNode(@"//a[contains(text(), 'Last &gt;&gt;')]")
-                .GetAttributeValue("href", "undefined")
-                .Split('&')[1]
-                .Remove(0, 5));
+                    var content = await response.Content.ReadAsStringAsync();
 
+                    using(var stringReader = new StringReader(content))
+                    {
+                        var document = new HtmlDocument();
+                        document.Load(stringReader);
 
-            // Build ConcurrentBag of traversable URLs
-            var cigarPages = new ConcurrentBag<string>();
+                        // 50 results per page
+                        var tableNodes = document
+                            .DocumentNode
+                            .SelectNodes("//table[@class='bbstable']/tr[position() > 2]")
+                            .Select(row => new CigarInfo
+                            {
+                                Id = int.Parse(row
+                                    .SelectSingleNode("./td/a")
+                                    .GetAttributeValue("href", "Undefined")
+                                    .Split('&')[1]
+                                    .Remove(0, 9)),
+                                Name = row.SelectSingleNode("./td/a").InnerText,
+                                LengthInches = FormatNodeContentToDecimal(row.SelectSingleNode("(./td)[2]")),
+                                RingGauge = int.Parse(row.SelectSingleNode("(./td)[3]").InnerText),
+                                Country = row.SelectSingleNode("(./td)[4]").InnerText,
+                                FillerCountry = row.SelectSingleNode("(./td)[5]").InnerText,
+                                WrapperCountry = row.SelectSingleNode("(./td)[6]").InnerText,
+                                Color = row.SelectSingleNode("(./td)[7]").InnerText,
+                                Strength = row.SelectSingleNode("(./td)[8]").InnerText
+                            });
 
-            Enumerable
-                .Range(1, lastPageNumber)
-                .Select(page => $"{scrapeConfig.BaseUrl}/default.asp?action=srchrslt&amp;page={page}")
-                .ToList()
-                .ForEach(url => cigarPages.Add(url));
+                        // Total amount of pages
+                        var lastPageNumber = int.Parse(document
+                            .DocumentNode
+                            .SelectSingleNode(@"//a[contains(text(), 'Last &gt;&gt;')]")
+                            .GetAttributeValue("href", "undefined")
+                            .Split('&')[1]
+                            .Remove(0, 5));
 
+                        // Build ConcurrentBag of traversable URLs
+                        var cigarPages = new ConcurrentBag<string>();
+
+                        Enumerable
+                            .Range(1, lastPageNumber)
+                            .Select(page => $"{scrapeConfig.CigarDbUrl}&page={page}")
+                            .ToList()
+                            .ForEach(url => cigarPages.Add(url));
+                    }
+                }
+            }
 
             //File.WriteAllText($"./cigars-output-{DateTime.Now.Ticks}.json", JsonConvert.SerializeObject(tableNodes));
         }

@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using Newtonsoft.Json;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace CigarInventoryCrawler
 {
@@ -23,69 +24,182 @@ namespace CigarInventoryCrawler
 
     public class Crawler
     {
-        public async void GetCigarsList()
+        private List<string> ProxyAddresses = new List<string>{
+            "134.60.51.152:3128",
+            "54.183.3.46:80",
+            "191.96.50.197:8080",
+            "94.177.234.22:3128"
+        };
+
+        public async Task GetCigarsList()
         {
             var config = File.ReadAllText("config.json");
             var scrapeConfig = JsonConvert.DeserializeObject<Config>(config);
-            var proxyUris = await GetHttpsProxyUrls();
 
-            using (var httpClientHandler = new HttpClientHandler
+            var unverifiedProxies = ProxyAddresses.Select(uri => new ProxyClient(uri));
+            var verifiedProxies = new List<ProxyClient>();
+
+            foreach(var proxy in unverifiedProxies)
             {
-                Proxy = new WebProxy(proxyUris.First())
-            })
-            {
-                using (var httpClient = new HttpClient())
+                if(await proxy.VerifyIpAddress())
                 {
-                    var response = await httpClient.GetAsync($"{scrapeConfig.CigarDbUrl}");
-                    response.EnsureSuccessStatusCode();
-
-                    var content = await response.Content.ReadAsStringAsync();
-
-                    using(var stringReader = new StringReader(content))
-                    {
-                        var document = new HtmlDocument();
-                        document.Load(stringReader);
-
-                        ReadCigarInfoListFromDocument(document);
-                        var pages = ReadTotalPageNumberFromDocument(document);
-                        GenerateCigarListingPageUris(pages, scrapeConfig.CigarDbUrl);
-                    }
+                    verifiedProxies.Add(proxy);
                 }
             }
 
-            //File.WriteAllText($"./cigars-output-{DateTime.Now.Ticks}.json", JsonConvert.SerializeObject(tableNodes));
+            var urls = GenerateCigarListingPageUris(5, scrapeConfig.SearchResultUrl);
+
+            var result = new List<HttpResponseMessage>();
+
+            foreach (var url in urls)
+            {
+                try
+                {
+                    var proxy = verifiedProxies.PickRandomElement();
+                    result.Add(await proxy.GetAsync(url));
+                    Console.WriteLine($"Response from {url}");
+                    await Task.Delay(3000);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message, ex.InnerException);
+                }
+            }
+
+            Console.WriteLine("DONE!");
+
+            //var listContents = SendRequestParallel(proxies, urls);
+
+
+
+            //proxies.ToList().ForEach(async x => Console.WriteLine("Created proxy:", await x.VerifyIpAddress()));
+
+            //var response = await proxies.First().GetAsync($"{scrapeConfig.CigarDbUrl}");
+            //response.EnsureSuccessStatusCode();
+
+            //var content = await response.Content.ReadAsStringAsync();
+
+            //using (var stringReader = new StringReader(content))
+            //{
+            //    var document = new HtmlDocument();
+            //    document.Load(stringReader);
+
+            //    //var result = ReadCigarInfoListFromDocument(document);
+            //    //var pages = ReadTotalPageNumberFromDocument(document);
+            //    var urls = GenerateCigarListingPageUris(10, scrapeConfig.CigarDbUrl);
+
+            //    var listContents = SendRequestParallel(proxies, urls);
+            //    //File.WriteAllText($"./cigars-output-{DateTime.Now.Ticks}.json", JsonConvert.SerializeObject(result));
+            //}
+        }
+
+        private async Task<IEnumerable<HttpResponseMessage>> SendRequestParallel(IEnumerable<ProxyClient> proxies, IEnumerable<string> urlList)
+        {
+            var results = new List<HttpResponseMessage>();
+
+            foreach (var chunk in urlList.Chunkify(5))
+            {
+                var tasks = chunk.Select(url =>
+                {
+                    var proxy = proxies.PickRandomElement();
+                    return proxy.GetAsync(url);
+                });
+
+                Console.WriteLine("Processing next batch...");
+                results.AddRange(await Task.WhenAll(tasks));
+                Console.WriteLine("Chunk processed, waiting 5s...");
+                await Task.Delay(5000);
+                Console.WriteLine("Delay completed, next round.");
+            }
+
+            return results;
+            // Jako chunkkeihin
+            // Jokaisesta taski
+            // Delay
+            // Looppi
+
+            //var options = new ParallelOptions { MaxDegreeOfParallelism = 5 };
+            //var results = new ConcurrentStack<string>();
+
+            //foreach(var urlsChunked in urlList.)
+
+            //return await Task.WhenAll(urlList.AsParallel().WithDegreeOfParallelism(1).Select(async url => {
+            //    await Task.Delay(new Random().Next(2000, 5000));
+            //    var proxy = proxies.PickRandomElement();
+            //    Console.WriteLine($"Connecting with proxy {proxy.Uri} to {url}");
+            //    var pageResult = await proxy.GetAsync(url);
+            //    Console.WriteLine($"Response received from {url}");
+            //    return pageResult;
+            //}));
+        }
+
+        private async Task<IEnumerable<ProxyClient>> CreateProxyClients()
+        {
+            var proxyUris = await GetHttpsProxyUrls();
+            var validProxies = new Queue<ProxyClient>();
+
+            foreach (var uri in proxyUris)
+            {
+                var proxy = await TryCreateProxy(uri);
+
+                if (proxy != null)
+                {
+                    validProxies.Enqueue(proxy);
+                }
+
+                if (validProxies.Count == 10)
+                {
+                    break;
+                }
+            }
+
+            return validProxies;
+        }
+
+        private async Task<ProxyClient> TryCreateProxy(string proxyUri)
+        {
+            try
+            {
+                var proxyClient = new ProxyClient(proxyUri);
+
+                var result = await proxyClient.GetAsync("https://api.ipify.org");
+
+                if (result.IsSuccessStatusCode)
+                {
+                    Debug.WriteLine(await result.Content.ReadAsStringAsync());
+                    return proxyClient;
+                }
+
+                return null;
+            }
+            catch (Exception e)
+            {
+                Debug.WriteLine(e);
+                return null;
+            }
         }
 
         private async Task<IEnumerable<string>> GetHttpsProxyUrls()
         {
-            using (var httpClient = new HttpClient())
-            {
-                Console.WriteLine("Fetching proxy list file...");
+            Console.WriteLine("Fetching proxy list file...");
 
-                var response = await httpClient.GetStringAsync("http://txt.proxyspy.net/proxy.txt");
+            var client = new HttpClient();
+            var response = await client.GetStringAsync("http://txt.proxyspy.net/proxy.txt");
 
-                Console.WriteLine("Proxy list file fetched. Processing...");
+            Console.WriteLine("Proxy list file fetched. Processing...");
 
-                return response
-                    .Split('\n')
-                    .Select(line => line.Split(' '))
-                    .Where(cells => cells.Count() == 4 && cells.ElementAt(1).Contains("-S"))
-                    .Select(proxy => proxy.ElementAt(0));
-            }
+            return response
+                .Split('\n')
+                .Select(line => line.Split(' '))
+                .Where(cells => cells.Count() == 4 && cells.ElementAt(1).Contains("-S"))
+                .Select(proxy => proxy.ElementAt(0));
         }
 
-        private ConcurrentBag<string> GenerateCigarListingPageUris(int totalPages, string baseUri)
+        private IEnumerable<string> GenerateCigarListingPageUris(int totalPages, string baseUri)
         {
-            // Build ConcurrentBag of traversable URLs
-            var cigarPages = new ConcurrentBag<string>();
-
-            Enumerable
+            return Enumerable
                 .Range(1, totalPages)
-                .Select(page => $"{baseUri}&page={page}")
-                .ToList()
-                .ForEach(url => cigarPages.Add(url));
-
-            return cigarPages;
+                .Select(page => $"{baseUri}/{page}");
         }
 
         private int ReadTotalPageNumberFromDocument(HtmlDocument document)
@@ -133,7 +247,7 @@ namespace CigarInventoryCrawler
 
         public class Config
         {
-            public string CigarDbUrl { get; set; }
+            public string SearchResultUrl { get; set; }
         }
 
         public class CigarInfo

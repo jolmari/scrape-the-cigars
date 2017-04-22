@@ -3,10 +3,9 @@ using System;
 
 namespace ScraperTestServer.Controllers
 {
-    [Route("api")]
+    [Route("/search-result")]
     public class ValuesController : Controller
     {
-        // GET api/5
         [HttpGet("{index}")]
         public ViewResult Get(int index)
         {
